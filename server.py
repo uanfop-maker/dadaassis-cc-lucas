@@ -9,17 +9,29 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 AGENT_ROLE = os.getenv("AGENT_ROLE", "harper")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "anthropic/claude-sonnet-4-6")
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
 INTER_SERVICE_SECRET_IN = os.getenv("INTER_SERVICE_SECRET_A", "")
 INTER_SERVICE_SECRET_OUT = os.getenv("INTER_SERVICE_SECRET_B", "")
 BUILD_SHA = os.getenv("BUILD_SHA", "dev")
-CLAUDE_TIMEOUT = int(os.getenv("CLAUDE_TIMEOUT", "90"))
+
+# Load agent persona from CLAUDE.md
+def _load_persona() -> str:
+    try:
+        with open("/root/CLAUDE.md", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return f"你是 {AGENT_ROLE}，DaDaAssis AI 核心團隊成員。請用繁體中文回覆。"
+
+SYSTEM_PROMPT = _load_persona()
 
 app = FastAPI(title=f"DaDaAssis cc-{AGENT_ROLE}", version="1.0.0")
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "role": AGENT_ROLE, "sha": BUILD_SHA}
+    return {"status": "ok", "role": AGENT_ROLE, "sha": BUILD_SHA, "model": AGENT_MODEL}
 
 
 class JobRequest(BaseModel):
@@ -46,34 +58,39 @@ async def receive_job(
 
 async def _process(req: JobRequest, trace_id: str) -> None:
     try:
-        result = await _run_claude(req.prompt, trace_id)
+        result = await _call_openrouter(req.prompt, trace_id)
         await _callback(req.callback_url, req.job_id, req.team_id, "done", result, trace_id)
     except Exception as exc:
         print(f"[{AGENT_ROLE.upper()}] error job={req.job_id} err={exc}", flush=True)
         await _callback(req.callback_url, req.job_id, req.team_id, "failed", str(exc), trace_id)
 
 
-async def _run_claude(prompt: str, trace_id: str) -> str:
-    print(f"[{AGENT_ROLE.upper()}] running claude -p trace={trace_id}", flush=True)
-    proc = await asyncio.create_subprocess_exec(
-        "claude", "-p", prompt,
-        "--output-format", "text",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env={**os.environ},
-        cwd="/root",
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError(f"claude timeout after {CLAUDE_TIMEOUT}s")
-    if proc.returncode != 0:
-        err = stderr.decode().strip()
-        raise RuntimeError(f"claude exit {proc.returncode}: {err[:200]}")
-    output = stdout.decode().strip()
-    print(f"[{AGENT_ROLE.upper()}] done len={len(output)} trace={trace_id}", flush=True)
-    return output
+async def _call_openrouter(prompt: str, trace_id: str) -> str:
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://dadaassis.zeabur.app",
+        "X-Title": f"DaDaAssis {AGENT_ROLE.capitalize()}",
+        "X-Trace-Id": trace_id,
+    }
+    payload = {
+        "model": AGENT_MODEL,
+        "max_tokens": MAX_TOKENS,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    async with httpx.AsyncClient(timeout=90) as client:
+        resp = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    text = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
+    print(f"[{AGENT_ROLE.upper()}] done in={usage.get('prompt_tokens',0)} out={usage.get('completion_tokens',0)} trace={trace_id}", flush=True)
+    return text
 
 
 async def _callback(
@@ -100,8 +117,9 @@ async def _callback(
                 if resp.status_code in (200, 202):
                     print(f"[{AGENT_ROLE.upper()}] callback ok job={job_id} attempt={attempt+1}", flush=True)
                     return
+                print(f"[{AGENT_ROLE.upper()}] callback status={resp.status_code} job={job_id}", flush=True)
             except Exception as exc:
-                print(f"[{AGENT_ROLE.upper()}] callback attempt {attempt+1} failed: {exc}", flush=True)
+                print(f"[{AGENT_ROLE.upper()}] callback attempt {attempt+1} err={exc}", flush=True)
             if attempt < max_retries - 1:
                 await asyncio.sleep(delays[attempt])
     print(f"[{AGENT_ROLE.upper()}] callback exhausted job={job_id}", flush=True)

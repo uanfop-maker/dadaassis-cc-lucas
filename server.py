@@ -9,7 +9,7 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 AGENT_ROLE = os.getenv("AGENT_ROLE", "harper")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("ANTHROPIC_API_KEY", "")
 AGENT_MODEL = os.getenv("AGENT_MODEL", "anthropic/claude-sonnet-4-6")
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "2000"))
 INTER_SERVICE_SECRET_IN = os.getenv("INTER_SERVICE_SECRET_A", "")

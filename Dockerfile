@@ -10,9 +10,12 @@ RUN pip3 install --no-cache-dir fastapi==0.115.0 "uvicorn[standard]==0.30.6" htt
 RUN mkdir -p /agent
 COPY server.py /agent/server.py
 COPY CLAUDE.md /root/CLAUDE.md
+COPY entrypoint.sh /agent/entrypoint.sh
+RUN chmod +x /agent/entrypoint.sh
 
 WORKDIR /root
 
 EXPOSE 8080
 
+ENTRYPOINT ["/agent/entrypoint.sh"]
 CMD ["python3", "/agent/server.py"]
